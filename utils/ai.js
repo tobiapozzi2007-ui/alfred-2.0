@@ -20,16 +20,17 @@ if (fs.existsSync(modulesPath)) {
   }
 }
 
+// LOG DI VERIFICA: Mostra nel terminale quali strumenti sono effettivamente disponibili
+console.log("🛠️ Strumenti caricati ed attivi in Alfred 2.0:");
+allTools.forEach(t => console.log(`   👉 ${t.function.name}`));
+
 export async function handleUserMessage(bot, msg) {
   const chatId = msg.chat.id;
   const userText = msg.text;
 
   bot.sendChatAction(chatId, 'typing');
-
-  // 1. Registra il messaggio utente nella cronologia locale
   saveChatMessage(chatId, 'user', userText);
 
-  // 2. Recupera fino agli ultimi 10 messaggi scambiati per dare contesto a Gemini
   const conversationHistory = getRecentHistory(chatId, 10);
 
   try {
@@ -38,12 +39,14 @@ export async function handleUserMessage(bot, msg) {
 
     const systemPrompt = {
       role: 'system',
-      content: `Sei Alfred 2.0, un assistente personale autonomo ed efficiente.
+      content: `Sei Alfred 2.0, l'assistente personale autonomo ed efficiente.
 Data e ora corrente: ${new Date().toLocaleString('it-IT')}.
 
-REGOLE SULLA MEMORIA:
-1. Quando l'utente ti comunica una preferenza o dato personale (es. la sua email, nome o note importanti), invoca SUBITO il tool 'save_to_memory' usando come collezione 'profilo' o 'note'.
-2. Se ti viene chiesta un'informazione memorizzata in precedenza che non ricordi, usa 'read_memory' per cercarla.`
+REGOLE ESSENZIALI:
+1. Per qualsiasi informazione sul meteo (attuale o per i prossimi giorni/domani), usa SEMPRE la funzione 'get_weather'.
+2. Per verificare o leggere gli impegni sul calendario, usa SEMPRE la funzione 'get_calendar_events'.
+3. Per aggiungere impegni, usa 'add_calendar_event'.
+4. Per salvataggi o note personali, usa 'save_to_memory'.`
     };
 
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -72,7 +75,6 @@ REGOLE SULLA MEMORIA:
 
     const message = data.choices[0].message;
 
-    // Gestione chiamate ai moduli/funzioni
     if (message.tool_calls && message.tool_calls.length > 0) {
       for (const call of message.tool_calls) {
         const fnName = call.function.name;
