@@ -1,13 +1,5 @@
 import nodemailer from 'nodemailer';
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  }
-});
-
 export const tools = [
   {
     type: "function",
@@ -29,16 +21,32 @@ export const tools = [
 
 export const handlers = {
   send_email: async ({ to, subject, body }) => {
+    const user = process.env.EMAIL_USER;
+    const pass = process.env.EMAIL_PASS;
+
+    if (!user || !pass) {
+      return "❌ Errore: EMAIL_USER o EMAIL_PASS non sono state trovate nel file .env!";
+    }
+
     try {
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          user: user.trim(),
+          pass: pass.trim()
+        }
+      });
+
       await transporter.sendMail({
-        from: process.env.EMAIL_USER,
+        from: user,
         to,
         subject,
         text: body
       });
-      return `Email inviata con successo a ${to}.`;
+
+      return `📧 Email inviata con successo a ${to}!`;
     } catch (err) {
-      return `Errore nell'invio dell'email: ${err.message}`;
+      return `❌ Errore nell'invio dell'email: ${err.message}`;
     }
   }
 };
