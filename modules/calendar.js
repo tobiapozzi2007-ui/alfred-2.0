@@ -2,15 +2,17 @@ import { google } from 'googleapis';
 
 const calendar = google.calendar('v3');
 
-// Inizializzazione OAuth2 usabile con Service Account o token salvato
 const getAuth = () => {
-  if (!process.env.GOOGLE_REFRESH_TOKEN) return null;
-  const auth = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET
-  );
-  auth.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
-  return auth;
+  if (!process.env.GOOGLE_CREDENTIALS) return null;
+  try {
+    const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+    const auth = google.auth.fromJSON(credentials);
+    auth.scopes = ['https://www.googleapis.com/auth/calendar'];
+    return auth;
+  } catch (err) {
+    console.error("Errore nel parsing di GOOGLE_CREDENTIALS:", err.message);
+    return null;
+  }
 };
 
 export const tools = [
@@ -18,7 +20,7 @@ export const tools = [
     type: "function",
     function: {
       name: "add_calendar_event",
-      description: "Aggiunge un evento al Google Calendar.",
+      description: "Aggiunge un nuovo evento al Google Calendar.",
       parameters: {
         type: "object",
         properties: {
@@ -35,7 +37,7 @@ export const tools = [
 export const handlers = {
   add_calendar_event: async ({ summary, startTime, endTime }) => {
     const auth = getAuth();
-    if (!auth) return "Credenziali Google Calendar non configurate nel file .env.";
+    if (!auth) return "Credenziali GOOGLE_CREDENTIALS mancanti o non valide nel file .env.";
 
     try {
       const res = await calendar.events.insert({
