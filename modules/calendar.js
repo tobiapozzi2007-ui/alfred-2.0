@@ -31,6 +31,21 @@ export const tools = [
         required: ["summary", "startTime", "endTime"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_calendar_events",
+      description: "Legge ed elenca gli eventi dell'agenda Google Calendar in un determinato intervallo di tempo (es. oggi, domani, questa settimana).",
+      parameters: {
+        type: "object",
+        properties: {
+          timeMin: { type: "string", description: "Data e ora di inizio ricerca in formato ISO (es. 2026-11-04T00:00:00Z)" },
+          timeMax: { type: "string", description: "Data e ora di fine ricerca in formato ISO (es. 2026-11-04T23:59:59Z)" }
+        },
+        required: ["timeMin", "timeMax"]
+      }
+    }
   }
 ];
 
@@ -52,6 +67,38 @@ export const handlers = {
       return `Evento "${summary}" creato con successo! Link: ${res.data.htmlLink}`;
     } catch (err) {
       return `Errore durante la creazione dell'evento: ${err.message}`;
+    }
+  },
+
+  get_calendar_events: async ({ timeMin, timeMax }) => {
+    const auth = getAuth();
+    if (!auth) return "Credenziali GOOGLE_CREDENTIALS mancanti o non valide nel file .env.";
+
+    try {
+      const res = await calendar.events.list({
+        auth,
+        calendarId: 'primary',
+        timeMin: timeMin || new Date().toISOString(),
+        timeMax,
+        singleEvents: true,
+        orderBy: 'startTime',
+      });
+
+      const events = res.data.items;
+      if (!events || events.length === 0) {
+        return "Nessun evento o impegno trovato in questo intervallo di tempo.";
+      }
+
+      const formattedEvents = events.map(event => ({
+        titolo: event.summary || 'Senza titolo',
+        inizio: event.start.dateTime || event.start.date,
+        fine: event.end.dateTime || event.end.date,
+        descrizione: event.description || ''
+      }));
+
+      return JSON.stringify(formattedEvents);
+    } catch (err) {
+      return `Errore nella lettura del calendario: ${err.message}`;
     }
   }
 };
