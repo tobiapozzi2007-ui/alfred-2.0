@@ -6,6 +6,7 @@ import { dbTools, dbHandlers, saveChatMessage, getRecentHistory } from './db.js'
 let allTools = [...dbTools];
 let allHandlers = { ...dbHandlers };
 
+// Caricamento dinamico ed automatico dei moduli Plug-and-Play
 const modulesPath = path.resolve('modules');
 if (fs.existsSync(modulesPath)) {
   const files = fs.readdirSync(modulesPath).filter(f => f.endsWith('.js'));
@@ -20,8 +21,7 @@ if (fs.existsSync(modulesPath)) {
   }
 }
 
-// LOG DI VERIFICA: Mostra nel terminale quali strumenti sono effettivamente disponibili
-console.log("🛠️ Strumenti caricati ed attivi in Alfred 2.0:");
+console.log("🛠️ Moduli e strumenti caricati dinamicamente:");
 allTools.forEach(t => console.log(`   👉 ${t.function.name}`));
 
 export async function handleUserMessage(bot, msg) {
@@ -37,58 +37,90 @@ export async function handleUserMessage(bot, msg) {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return bot.sendMessage(chatId, "❌ Errore: OPENROUTER_API_KEY non trovata nel file .env!");
 
+    // Prompt di sistema completamente generico: NESSUNA funzione cablata!
     const systemPrompt = {
       role: 'system',
-      content: `Sei Alfred 2.0, l'assistente personale autonomo ed efficiente.
+      content: `Sei Alfred 2.0, un assistente personale autonomo, intelligente ed efficiente.
 Data e ora corrente: ${new Date().toLocaleString('it-IT')}.
 
-REGOLE ESSENZIALI:
-1. Per qualsiasi informazione sul meteo (attuale o per i prossimi giorni/domani), usa SEMPRE la funzione 'get_weather'.
-2. Per verificare o leggere gli impegni sul calendario, usa SEMPRE la funzione 'get_calendar_events'.
-3. Per aggiungere impegni, usa 'add_calendar_event'.
-4. Per salvataggi o note personali, usa 'save_to_memory'.`
+ISTRUZIONI GENERATIVE ED ESECUZIONE TOOL:
+1. Hai a disposizione strumenti (tools) per accedere a dati esterni, memoria locale o servizi. Usali autonomamente ogni volta che serve per soddisfare la richiesta.
+2. Quando ricevi l'esito o i dati da uno strumento, NON mostrare mai il JSON o il testo grezzo all'utente.
+3. Rileggi i dati ottenuti e formula una risposta chiara, naturale, discorsiva, precisa ed esaustiva in italiano in base alla domanda esatta dell'utente.`
     };
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-2.5-flash',
-        messages: [systemPrompt, ...conversationHistory],
-        tools: allTools.length > 0 ? allTools : undefined,
-        tool_choice: 'auto'
-      })
-    });
+    let messages = [systemPrompt, ...conversationHistory];
 
-    const data = await response.json();
+    // Ciclo dinamico di rielaborazione (Tool Call -> Esecuzione -> Risposta finale)
+    let maxTurns = 5;
+    while (maxTurns > 0) {
+      maxTurns--;
 
-    if (data.error) {
-      return bot.sendMessage(chatId, `❌ Errore OpenRouter: ${data.error.message}`);
-    }
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'google/gemini-2.5-flash',
+          messages: messages,
+          tools: allTools.length > 0 ? allTools : undefined,
+          tool_choice: 'auto'
+        })
+      });
 
-    if (!data.choices || !data.choices[0]) {
-      return bot.sendMessage(chatId, "⚠️ Nessuna risposta ricevuta dal modello AI.");
-    }
+      const data = await response.json();
 
-    const message = data.choices[0].message;
-
-    if (message.tool_calls && message.tool_calls.length > 0) {
-      for (const call of message.tool_calls) {
-        const fnName = call.function.name;
-        const args = JSON.parse(call.function.arguments);
-
-        if (allHandlers[fnName]) {
-          const result = await allHandlers[fnName](args);
-          saveChatMessage(chatId, 'assistant', result);
-          await bot.sendMessage(chatId, result);
-        }
+      if (data.error) {
+        console.error("❌ Errore OpenRouter:", data.error);
+        return bot.sendMessage(chatId, `❌ Errore OpenRouter: ${data.error.message}`);
       }
-    } else if (message.content) {
-      saveChatMessage(chatId, 'assistant', message.content);
-      await bot.sendMessage(chatId, message.content);
+
+      if (!data.choices || !data.choices[0]) {
+        return bot.sendMessage(chatId, "⚠️ Nessuna risposta ricevuta dal modello AI.");
+      }
+
+      const responseMessage = data.choices[0].message;
+      messages.push(responseMessage);
+
+      // Risposta finale rielaborata per l'utente
+      if (!responseMessage.tool_calls || responseMessage.tool_calls.length === 0) {
+        const finalReply = responseMessage.content || "Richiesta completata.";
+        saveChatMessage(chatId, 'assistant', finalReply);
+        await bot.sendMessage(chatId, finalReply);
+        break;
+      }
+
+      // Esecuzione dei tool invocati dall'IA in autonomia
+      for (const call of responseMessage.tool_calls) {
+        const fnName = call.function.name;
+        let args = {};
+        try {
+          args = JSON.parse(call.function.arguments);
+        } catch (e) {
+          args = {};
+        }
+
+        console.log(`⚙️ Esecuzione tool '${fnName}':`, args);
+
+        let toolResult = "Funzione non trovata o fallita.";
+        if (allHandlers[fnName]) {
+          try {
+            toolResult = await allHandlers[fnName](args);
+          } catch (err) {
+            toolResult = `Errore esecuzione ${fnName}: ${err.message}`;
+          }
+        }
+
+        // Passiamo i dati grezzi ottenuti dal modulo a Gemini affinché li rilegga e risponda
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          name: fnName,
+          content: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult)
+        });
+      }
     }
   } catch (err) {
     console.error("Errore AI:", err);
