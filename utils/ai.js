@@ -1,12 +1,11 @@
 import fs from 'fs';
 import path from 'path';
 import fetch from 'node-fetch';
-import { dbTools, dbHandlers } from './db.js';
+import { dbTools, dbHandlers, saveChatMessage, getRecentHistory } from './db.js';
 
 let allTools = [...dbTools];
 let allHandlers = { ...dbHandlers };
 
-// CARICAMENTO AUTOMATICO DEI MODULI PLUG-AND-PLAY
 const modulesPath = path.resolve('modules');
 if (fs.existsSync(modulesPath)) {
   const files = fs.readdirSync(modulesPath).filter(f => f.endsWith('.js'));
@@ -27,12 +26,25 @@ export async function handleUserMessage(bot, msg) {
 
   bot.sendChatAction(chatId, 'typing');
 
+  // 1. Registra il messaggio utente nella cronologia locale
+  saveChatMessage(chatId, 'user', userText);
+
+  // 2. Recupera fino agli ultimi 10 messaggi scambiati per dare contesto a Gemini
+  const conversationHistory = getRecentHistory(chatId, 10);
+
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
-    if (!apiKey) {
-      await bot.sendMessage(chatId, "❌ Errore: OPENROUTER_API_KEY non trovata nel file .env!");
-      return;
-    }
+    if (!apiKey) return bot.sendMessage(chatId, "❌ Errore: OPENROUTER_API_KEY non trovata nel file .env!");
+
+    const systemPrompt = {
+      role: 'system',
+      content: `Sei Alfred 2.0, un assistente personale autonomo ed efficiente.
+Data e ora corrente: ${new Date().toLocaleString('it-IT')}.
+
+REGOLE SULLA MEMORIA:
+1. Quando l'utente ti comunica una preferenza o dato personale (es. la sua email, nome o note importanti), invoca SUBITO il tool 'save_to_memory' usando come collezione 'profilo' o 'note'.
+2. Se ti viene chiesta un'informazione memorizzata in precedenza che non ricordi, usa 'read_memory' per cercarla.`
+    };
 
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -42,13 +54,7 @@ export async function handleUserMessage(bot, msg) {
       },
       body: JSON.stringify({
         model: 'google/gemini-2.5-flash',
-        messages: [
-          {
-            role: 'system',
-            content: `Sei Alfred 2.0, l'assistente personale autonomo. Rispondi sempre in modo naturale, sintetico ed efficiente in italiano. Data e ora attuale: ${new Date().toLocaleString('it-IT')}`
-          },
-          { role: 'user', content: userText }
-        ],
+        messages: [systemPrompt, ...conversationHistory],
         tools: allTools.length > 0 ? allTools : undefined,
         tool_choice: 'auto'
       })
@@ -56,22 +62,17 @@ export async function handleUserMessage(bot, msg) {
 
     const data = await response.json();
 
-    // Gestione errori API OpenRouter
     if (data.error) {
-      console.error("❌ Errore OpenRouter:", JSON.stringify(data.error));
-      await bot.sendMessage(chatId, `❌ Errore OpenRouter: ${data.error.message || 'Verifica la tua chiave API o il saldo.'}`);
-      return;
+      return bot.sendMessage(chatId, `❌ Errore OpenRouter: ${data.error.message}`);
     }
 
     if (!data.choices || !data.choices[0]) {
-      console.error("❌ Risposta OpenRouter non valida:", JSON.stringify(data));
-      await bot.sendMessage(chatId, "⚠️ Nessuna risposta ricevuta dal modello AI.");
-      return;
+      return bot.sendMessage(chatId, "⚠️ Nessuna risposta ricevuta dal modello AI.");
     }
 
     const message = data.choices[0].message;
 
-    // Se l'IA attiva una funzione (Function Calling)
+    // Gestione chiamate ai moduli/funzioni
     if (message.tool_calls && message.tool_calls.length > 0) {
       for (const call of message.tool_calls) {
         const fnName = call.function.name;
@@ -79,10 +80,12 @@ export async function handleUserMessage(bot, msg) {
 
         if (allHandlers[fnName]) {
           const result = await allHandlers[fnName](args);
+          saveChatMessage(chatId, 'assistant', result);
           await bot.sendMessage(chatId, result);
         }
       }
     } else if (message.content) {
+      saveChatMessage(chatId, 'assistant', message.content);
       await bot.sendMessage(chatId, message.content);
     }
   } catch (err) {
