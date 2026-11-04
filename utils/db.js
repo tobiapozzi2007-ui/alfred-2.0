@@ -1,94 +1,165 @@
 import Database from 'better-sqlite3';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-const db = new Database('alfred_memory.sqlite');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DB_PATH = path.join(__dirname, '..', 'alfred_memory.sqlite');
 
-// Tabella 1: Memoria a lungo termine (liste, note, preferenze utente)
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+
 db.exec(`
+  CREATE TABLE IF NOT EXISTS chat_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     collection TEXT NOT NULL,
     content TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_items_collection ON items (collection);
 `);
 
-// Tabella 2: Memoria a breve termine (cronologia chat di Telegram)
-db.exec(`
-  CREATE TABLE IF NOT EXISTS chat_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+/* ------------------------------------------------------------------ */
+/*  Cronologia chat                                                    */
+/* ------------------------------------------------------------------ */
 
-export const saveChatMessage = (chatId, role, content) => {
-  const stmt = db.prepare('INSERT INTO chat_history (chat_id, role, content) VALUES (?, ?, ?)');
-  stmt.run(chatId.toString(), role, content);
-};
+const insertMessage = db.prepare('INSERT INTO chat_history (role, content) VALUES (?, ?)');
+const selectRecent = db.prepare(
+  'SELECT role, content FROM (SELECT id, role, content FROM chat_history ORDER BY id DESC LIMIT ?) ORDER BY id ASC'
+);
 
-export const getRecentHistory = (chatId, limit = 10) => {
-  const stmt = db.prepare(`
-    SELECT role, content FROM (
-      SELECT role, content, id FROM chat_history 
-      WHERE chat_id = ? 
-      ORDER BY id DESC LIMIT ?
-    ) ORDER BY id ASC
-  `);
-  return stmt.all(chatId.toString(), limit);
-};
+export function saveMessage(role, content) {
+  if (!content) return;
+  insertMessage.run(role, String(content));
+}
 
-export const dbTools = [
+export function getRecentMessages(limit = 10) {
+  return selectRecent.all(limit);
+}
+
+export function clearHistory() {
+  db.prepare('DELETE FROM chat_history').run();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Memoria permanente (tabella items) - esposta come tool             */
+/* ------------------------------------------------------------------ */
+
+const normalizeCollection = (c) => String(c || '').trim().toLowerCase();
+
+export const tools = [
   {
-    type: "function",
+    type: 'function',
     function: {
-      name: "save_to_memory",
-      description: "Salva informazioni permanenti o preferenze dell'utente (es. email, liste, note, spese).",
+      name: 'save_to_memory',
+      description:
+        'Salva un elemento nella memoria permanente, organizzata per collezioni (es. "profilo" per informazioni sull\'utente, "spesa" per la lista della spesa, "note" per appunti liberi). Usalo quando l\'utente chiede di ricordare, annotare o aggiungere qualcosa, o quando emerge un\'informazione personale duratura.',
       parameters: {
-        type: "object",
+        type: 'object',
         properties: {
-          collection: { type: "string", description: "Collezione (es. profilo, spesa, note)" },
-          content: { type: "string", description: "L'informazione esatta da salvare" }
+          collection: {
+            type: 'string',
+            description: 'Nome della collezione (es. "profilo", "spesa", "note").'
+          },
+          content: {
+            type: 'string',
+            description: 'Contenuto da salvare, scritto in modo chiaro e autosufficiente.'
+          }
         },
-        required: ["collection", "content"]
+        required: ['collection', 'content']
       }
     }
   },
   {
-    type: "function",
+    type: 'function',
     function: {
-      name: "read_memory",
-      description: "Cerca e legge informazioni salvate nel database di memoria.",
+      name: 'read_memory',
+      description:
+        'Legge dalla memoria permanente. Senza parametri elenca tutte le collezioni esistenti con il numero di elementi; con "collection" restituisce gli elementi di quella collezione; con "query" filtra per testo.',
       parameters: {
-        type: "object",
+        type: 'object',
         properties: {
-          collection: { type: "string", description: "Collezione specifica da consultare (opzionale)" },
-          search: { type: "string", description: "Parola chiave da cercare (opzionale)" }
+          collection: {
+            type: 'string',
+            description: 'Collezione da leggere (opzionale).'
+          },
+          query: {
+            type: 'string',
+            description: 'Testo da cercare all\'interno degli elementi (opzionale).'
+          }
         }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_from_memory',
+      description:
+        'Elimina un elemento dalla memoria permanente tramite il suo id (ottenibile con read_memory). Usalo quando l\'utente chiede di togliere o dimenticare qualcosa.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'integer', description: 'Id dell\'elemento da eliminare.' }
+        },
+        required: ['id']
       }
     }
   }
 ];
 
-export const dbHandlers = {
-  save_to_memory: async ({ collection, content }) => {
-    const stmt = db.prepare('INSERT INTO items (collection, content) VALUES (?, ?)');
-    stmt.run(collection.toLowerCase(), content);
-    return `Ho salvato correttamente l'informazione ("${content}") nella memoria "${collection}".`;
-  },
-  read_memory: async ({ collection, search }) => {
-    let stmt, rows;
-    if (collection) {
-      stmt = db.prepare('SELECT content FROM items WHERE collection = ? ORDER BY id DESC');
-      rows = stmt.all(collection.toLowerCase());
-    } else if (search) {
-      stmt = db.prepare('SELECT collection, content FROM items WHERE content LIKE ? ORDER BY id DESC');
-      rows = stmt.all(`%${search}%`);
-    } else {
-      stmt = db.prepare('SELECT collection, content FROM items ORDER BY id DESC LIMIT 20');
-      rows = stmt.all();
+export const handlers = {
+  save_to_memory({ collection, content }) {
+    const col = normalizeCollection(collection);
+    if (!col || !content || !String(content).trim()) {
+      return { success: false, error: 'Servono sia "collection" sia "content".' };
     }
-    return rows.length > 0 ? JSON.stringify(rows) : "Nessuna informazione trovata in memoria.";
+    const info = db
+      .prepare('INSERT INTO items (collection, content) VALUES (?, ?)')
+      .run(col, String(content).trim());
+    return { success: true, id: Number(info.lastInsertRowid), collection: col };
+  },
+
+  read_memory({ collection, query } = {}) {
+    const col = normalizeCollection(collection);
+    const q = query ? `%${String(query).trim()}%` : null;
+
+    if (!col && !q) {
+      const collections = db
+        .prepare('SELECT collection, COUNT(*) AS count FROM items GROUP BY collection ORDER BY collection')
+        .all();
+      return { collections };
+    }
+
+    const where = [];
+    const params = [];
+    if (col) {
+      where.push('collection = ?');
+      params.push(col);
+    }
+    if (q) {
+      where.push('content LIKE ?');
+      params.push(q);
+    }
+    const rows = db
+      .prepare(
+        `SELECT id, collection, content, created_at FROM items WHERE ${where.join(' AND ')} ORDER BY id ASC LIMIT 200`
+      )
+      .all(...params);
+    return { count: rows.length, items: rows };
+  },
+
+  delete_from_memory({ id }) {
+    const info = db.prepare('DELETE FROM items WHERE id = ?').run(Number(id));
+    return { success: info.changes > 0, deleted: info.changes };
   }
 };
+
+export default db;
