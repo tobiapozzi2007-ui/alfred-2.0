@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import TelegramBot from 'node-telegram-bot-api';
-import { initAI, askAlfred } from './utils/ai.js';
-import { clearHistory } from './utils/db.js';
+import { initAI, startModules, askAlfred } from './utils/ai.js';
+import { clearHistory, saveMessage } from './utils/db.js';
 
 const { TELEGRAM_BOT_TOKEN, ALLOWED_USER_ID, OPENROUTER_API_KEY } = process.env;
 
@@ -35,6 +35,13 @@ async function sendLong(chatId, text) {
   for (const chunk of splitMessage(text)) {
     await bot.sendMessage(chatId, chunk);
   }
+}
+
+// Messaggio iniziato da Alfred (promemoria, briefing, avvisi): lo invia e lo
+// registra nella cronologia, così se rispondi "ok" o "spostalo" ha il contesto.
+async function notify(text) {
+  await sendLong(ALLOWED_USER_ID, text);
+  saveMessage('assistant', text);
 }
 
 async function handleMessage(msg) {
@@ -78,6 +85,9 @@ bot.on('message', (msg) => {
 });
 
 bot.on('polling_error', (err) => console.error('[telegram] polling_error:', err.code || '', err.message));
+
+// Avvia le attività proprie dei moduli (promemoria, briefing, avvisi...)
+await startModules({ chatId: ALLOWED_USER_ID, notify });
 
 const shutdown = async () => {
   console.log('Arresto di Alfred...');
