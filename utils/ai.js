@@ -2,12 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import fetch from 'node-fetch';
 import { fileURLToPath, pathToFileURL } from 'url';
-import {
-  tools as coreTools,
-  handlers as coreHandlers,
-  saveMessage,
-  getRecentMessages
-} from './db.js';
+import * as dbModule from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MODULES_DIR = path.join(__dirname, '..', 'modules');
@@ -21,6 +16,7 @@ const TIMEZONE = process.env.BOT_TIMEZONE || 'Europe/Rome';
 
 let registeredTools = [];
 let registeredHandlers = {};
+let initHooks = [];
 let initialized = false;
 
 /* ------------------------------------------------------------------ */
@@ -67,9 +63,10 @@ function register(toolList, handlerMap, source) {
 export async function initAI() {
   registeredTools = [];
   registeredHandlers = {};
+  initHooks = [];
 
-  // Memoria permanente (utils/db.js)
-  register(coreTools, coreHandlers, 'utils/db.js');
+  // Memoria permanente (utils/db.js): accetta sia tools/handlers sia dbTools/dbHandlers
+  register(dbModule.tools ?? dbModule.dbTools, dbModule.handlers ?? dbModule.dbHandlers, 'utils/db.js');
 
   // Scansione automatica di modules/
   const files = fs
@@ -81,6 +78,8 @@ export async function initAI() {
     try {
       const mod = await import(pathToFileURL(path.join(MODULES_DIR, file)).href);
       register(mod.tools, mod.handlers, `modules/${file}`);
+      // Hook opzionale: un modulo può esportare init(ctx) per avviare attività proprie (timer, controlli periodici)
+      if (typeof mod.init === 'function') initHooks.push({ file, init: mod.init });
       console.log(`[ai] Modulo caricato: ${file}`);
     } catch (err) {
       console.error(`[ai] Errore nel caricamento di ${file}:`, err.message);
@@ -89,6 +88,24 @@ export async function initAI() {
 
   initialized = true;
   console.log(`[ai] ${registeredTools.length} tool disponibili.`);
+}
+
+/**
+ * Avvia gli hook init(ctx) dei moduli che ne hanno uno.
+ * ctx contiene: chatId, notify(testo), runTask(istruzione).
+ * Va chiamata una sola volta, dopo che il bot Telegram è pronto.
+ */
+export async function startModules(baseCtx) {
+  if (!initialized) await initAI();
+  const ctx = { ...baseCtx, runTask };
+  for (const hook of initHooks) {
+    try {
+      await hook.init(ctx);
+      console.log(`[ai] Attività avviate: ${hook.file}`);
+    } catch (err) {
+      console.error(`[ai] Errore in init di ${hook.file}:`, err);
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -195,18 +212,10 @@ function serializeToolResult(result) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Ciclo principale                                                   */
+/*  Ciclo Function Calling a due fasi                                  */
 /* ------------------------------------------------------------------ */
 
-export async function askAlfred(userText) {
-  if (!initialized) await initAI();
-
-  const messages = [
-    { role: 'system', content: buildSystemPrompt() },
-    ...getRecentMessages(10),
-    { role: 'user', content: userText }
-  ];
-
+async function runLoop(messages) {
   let finalText = null;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -242,10 +251,49 @@ export async function askAlfred(userText) {
     finalText = message.content;
   }
 
-  finalText = (finalText || '').trim() || 'Scusa, non sono riuscito a formulare una risposta. Riprova pure.';
+  return (finalText || '').trim();
+}
 
-  saveMessage('user', userText);
-  saveMessage('assistant', finalText);
+/* ------------------------------------------------------------------ */
+/*  API pubbliche                                                      */
+/* ------------------------------------------------------------------ */
+
+// Messaggio dell'utente -> risposta (salva lo scambio nella cronologia)
+export async function askAlfred(userText) {
+  if (!initialized) await initAI();
+
+  const messages = [
+    { role: 'system', content: buildSystemPrompt() },
+    ...dbModule.getRecentMessages(10),
+    { role: 'user', content: userText }
+  ];
+
+  const finalText =
+    (await runLoop(messages)) || 'Scusa, non sono riuscito a formulare una risposta. Riprova pure.';
+
+  dbModule.saveMessage('user', userText);
+  dbModule.saveMessage('assistant', finalText);
 
   return finalText;
+}
+
+// Compito automatico (promemoria, briefing, avvisi...) -> testo da inviare all'utente.
+// Non salva nulla: chi lo invia usa notify(), che registra il messaggio nella cronologia.
+export async function runTask(instruction) {
+  if (!initialized) await initAI();
+
+  const messages = [
+    { role: 'system', content: buildSystemPrompt() },
+    ...dbModule.getRecentMessages(10),
+    {
+      role: 'user',
+      content:
+        `[COMPITO AUTOMATICO: non è un messaggio dell'utente, è un'attività pianificata] ${instruction}\n\n` +
+        'Scrivi direttamente il messaggio che verrà inviato all\'utente su Telegram, senza accennare al fatto che è un compito automatico.'
+    }
+  ];
+
+  const text = await runLoop(messages);
+  if (!text) throw new Error('Il modello non ha prodotto alcun testo per il compito automatico.');
+  return text;
 }
