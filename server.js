@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import fetch from 'node-fetch';
 import TelegramBot from 'node-telegram-bot-api';
 import { initAI, startModules, askAlfred } from './utils/ai.js';
 import { clearHistory, saveMessage } from './utils/db.js';
@@ -13,6 +14,10 @@ if (!TELEGRAM_BOT_TOKEN || !ALLOWED_USER_ID || !OPENROUTER_API_KEY) {
 await initAI();
 
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
+
+const MAX_FILE_BYTES = 15 * 1024 * 1024;
+const DEFAULT_ATTACHMENT_PROMPT =
+  'Ti ho inviato questo allegato: dimmi cosa contiene e, se ha senso, fai ciò che serve (per esempio registra la spesa se è uno scontrino).';
 
 // Elabora un messaggio alla volta, così la cronologia resta coerente
 let queue = Promise.resolve();
@@ -44,25 +49,81 @@ async function notify(text) {
   saveMessage('assistant', text);
 }
 
+/* ------------------------------------------------------------------ */
+/*  Allegati: foto e PDF                                               */
+/* ------------------------------------------------------------------ */
+
+async function downloadAsBase64(fileId) {
+  const link = await bot.getFileLink(fileId);
+  const res = await fetch(link);
+  if (!res.ok) throw new Error(`Download fallito (${res.status})`);
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length > MAX_FILE_BYTES) throw new Error('FILE_TROPPO_GRANDE');
+  return buffer.toString('base64');
+}
+
+// Restituisce l'elenco di allegati leggibili, oppure lancia un errore comprensibile
+async function collectAttachments(msg) {
+  if (msg.photo?.length) {
+    const best = msg.photo[msg.photo.length - 1]; // la risoluzione più alta
+    return [{ type: 'image', mime: 'image/jpeg', data: await downloadAsBase64(best.file_id) }];
+  }
+
+  const doc = msg.document;
+  if (!doc) return [];
+  if (doc.file_size && doc.file_size > MAX_FILE_BYTES) throw new Error('FILE_TROPPO_GRANDE');
+
+  const mime = doc.mime_type || '';
+  if (mime === 'application/pdf') {
+    return [{ type: 'pdf', filename: doc.file_name || 'documento.pdf', data: await downloadAsBase64(doc.file_id) }];
+  }
+  if (mime.startsWith('image/')) {
+    return [{ type: 'image', mime, data: await downloadAsBase64(doc.file_id) }];
+  }
+  throw new Error('FORMATO_NON_SUPPORTATO');
+}
+
+/* ------------------------------------------------------------------ */
+/*  Gestione messaggi                                                  */
+/* ------------------------------------------------------------------ */
+
 async function handleMessage(msg) {
   const chatId = msg.chat.id;
-  const text = msg.text.trim();
+  const text = (msg.text || msg.caption || '').trim();
 
-  if (text === '/start') {
-    await bot.sendMessage(chatId, 'Buongiorno, sono Alfred. Come posso aiutarla?');
-    return;
-  }
-  if (text === '/reset') {
-    clearHistory();
-    await bot.sendMessage(chatId, 'Conversazione azzerata. La memoria permanente è rimasta intatta.');
-    return;
+  if (msg.text) {
+    if (text === '/start') {
+      await bot.sendMessage(chatId, 'Buongiorno, sono Alfred. Come posso aiutarla?');
+      return;
+    }
+    if (text === '/reset') {
+      clearHistory();
+      await bot.sendMessage(chatId, 'Conversazione azzerata. La memoria permanente è rimasta intatta.');
+      return;
+    }
   }
 
   bot.sendChatAction(chatId, 'typing').catch(() => {});
   const typing = setInterval(() => bot.sendChatAction(chatId, 'typing').catch(() => {}), 4000);
 
   try {
-    const reply = await askAlfred(text);
+    let attachments = [];
+    try {
+      attachments = await collectAttachments(msg);
+    } catch (err) {
+      if (err.message === 'FILE_TROPPO_GRANDE') {
+        await bot.sendMessage(chatId, 'Il file è troppo grande: il limite è 15 MB.');
+      } else if (err.message === 'FORMATO_NON_SUPPORTATO') {
+        await bot.sendMessage(chatId, 'Per ora leggo solo foto, immagini e PDF.');
+      } else {
+        console.error('[server] Errore nel download dell\'allegato:', err.message);
+        await bot.sendMessage(chatId, 'Non sono riuscito a scaricare l\'allegato. Riprova tra poco.');
+      }
+      return;
+    }
+
+    const prompt = text || DEFAULT_ATTACHMENT_PROMPT;
+    const reply = await askAlfred(prompt, attachments);
     await sendLong(chatId, reply);
   } catch (err) {
     console.error('[server] Errore:', err);
@@ -76,8 +137,8 @@ bot.on('message', (msg) => {
   // Sicurezza: si risponde solo all'utente autorizzato
   if (String(msg.from?.id) !== String(ALLOWED_USER_ID)) return;
 
-  if (!msg.text) {
-    bot.sendMessage(msg.chat.id, 'Per ora capisco solo messaggi di testo.').catch(() => {});
+  if (!msg.text && !msg.photo && !msg.document) {
+    bot.sendMessage(msg.chat.id, 'Per ora capisco messaggi di testo, foto e PDF.').catch(() => {});
     return;
   }
 
@@ -86,7 +147,7 @@ bot.on('message', (msg) => {
 
 bot.on('polling_error', (err) => console.error('[telegram] polling_error:', err.code || '', err.message));
 
-// Avvia le attività proprie dei moduli (promemoria, briefing, avvisi...)
+// Avvia le attività proprie dei moduli (promemoria, briefing, email, backup...)
 await startModules({ chatId: ALLOWED_USER_ID, notify });
 
 const shutdown = async () => {
