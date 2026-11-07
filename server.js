@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import fetch from 'node-fetch';
 import TelegramBot from 'node-telegram-bot-api';
-import { initAI, startModules, askAlfred } from './utils/ai.js';
+import { initAI, startModules, askAlfred, runTask, getToolCatalog } from './utils/ai.js';
+import { announceUpdate } from './utils/updates.js';
 import { clearHistory, saveMessage } from './utils/db.js';
 
 const { TELEGRAM_BOT_TOKEN, ALLOWED_USER_ID, OPENROUTER_API_KEY } = process.env;
@@ -149,6 +150,11 @@ bot.on('polling_error', (err) => console.error('[telegram] polling_error:', err.
 
 // Avvia le attività proprie dei moduli (promemoria, briefing, email, backup...)
 await startModules({ chatId: ALLOWED_USER_ID, notify });
+
+// Dopo un aggiornamento scrive all'utente cosa è cambiato e quali nuove skill ha imparato
+announceUpdate({ catalog: getToolCatalog(), notify, runTask }).catch((err) =>
+  console.error('[server] Annuncio aggiornamento non riuscito:', err.message)
+);
 
 const shutdown = async () => {
   console.log('Arresto di Alfred...');
