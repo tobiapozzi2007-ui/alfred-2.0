@@ -139,7 +139,7 @@ function buildSystemPrompt(queryText = '') {
     'Hai a disposizione degli strumenti: usali ogni volta che servono dati aggiornati o azioni concrete, senza chiedere conferma per semplici letture. Per azioni con effetti esterni (inviare messaggi, creare eventi) assicurati di avere tutti i dati necessari e, se manca qualcosa di essenziale, chiedilo.',
     'Dopo aver ricevuto il risultato di uno strumento, rileggi i dati e scrivi una risposta finale naturale, discorsiva e dettagliata. Non mostrare mai JSON, nomi di funzioni o dati grezzi all\'utente.',
     'Se uno strumento restituisce un errore, spiegalo in modo semplice e proponi come procedere.',
-    'Memoria: quando l\'utente ti dà un\'informazione da ricordare, una preferenza o una regola, salvala subito con lo strumento di memoria, senza chiedere conferma. Regole, preferenze e istruzioni permanenti vanno salvate come "sempre visibili"; fatti e dati (contatti, date, indirizzi) come ricordi normali, in uno spazio di memoria coerente con quelli già esistenti. Scrivi le voci in terza persona ("L\'utente si chiama..."), mai in prima persona. Se una nuova informazione corregge o integra qualcosa di già salvato, aggiornala invece di crearne un\'altra. Se ciò che serve non compare nella memoria che ti viene mostrata, cercalo con lo strumento di lettura prima di dire che non lo sai o che non ricordi. Dì di aver salvato qualcosa solo se lo strumento ha avuto successo.',
+    'Memoria: quando l\'utente ti dà un\'informazione da ricordare, una preferenza o una regola, salvala subito con lo strumento di memoria, senza chiedere conferma. Frasi come "devi sempre", "d\'ora in poi", "ricordati che" o "come regola" indicano una regola o preferenza permanente: salvala subito, prima di rispondere. Regole, preferenze e istruzioni permanenti vanno salvate come "sempre visibili"; fatti e dati (contatti, date, indirizzi) come ricordi normali, in uno spazio di memoria coerente con quelli già esistenti. Scrivi le voci in terza persona ("L\'utente si chiama..."), mai in prima persona. Se una nuova informazione corregge o integra qualcosa di già salvato, aggiornala invece di crearne un\'altra. Se ciò che serve non compare nella memoria che ti viene mostrata, cercalo con lo strumento di lettura prima di dire che non lo sai o che non ricordi. Dì di aver salvato qualcosa solo se lo strumento ha avuto successo.',
     'Formato: testo semplice adatto a Telegram, senza Markdown (niente asterischi, cancelletti o backtick). Puoi andare a capo e usare qualche emoji con parsimonia.'
   ].join('\n');
 
@@ -246,7 +246,7 @@ function serializeToolResult(result) {
 
 // Il modello a volte scrive "ho salvato / ho inviato..." senza aver chiamato nessuno strumento.
 const ACTION_CLAIM =
-  /\b(ho|abbiamo)\s+(appena\s+)?(salvat[oa]|memorizzat[oa]|registrat[oa]|annotat[oa]|aggiunt[oa]|inviat[oa]|mandat[oa]|creat[oa]|eliminat[oa]|cancellat[oa]|aggiornat[oa]|impostat[oa]|programmat[oa])\b|(?:^|\s)(è|e'|sono)\s+stat[oaie]\s+(salvat|memorizzat|registrat|inviat|aggiunt|creat|eliminat|aggiornat)/i;
+  /\b(ho|abbiamo)\s+(appena\s+)?(salvat[oa]|memorizzat[oa]|registrat[oa]|annotat[oa]|aggiunt[oa]|inviat[oa]|mandat[oa]|creat[oa]|eliminat[oa]|cancellat[oa]|aggiornat[oa]|impostat[oa]|programmat[oa])\b|(?:^|\s)(è|e'|sono)\s+stat[oaie]\s+(salvat|memorizzat|registrat|inviat|aggiunt|creat|eliminat|aggiornat)|d['’]ora\s+in\s+poi|da\s+ora\s+in\s+poi|la\s+prossima\s+volta|\bricorder[òo]|\bterr[òo]\s+(a\s+mente|presente|conto)/i;
 
 export const claimsAction = (text) => ACTION_CLAIM.test(String(text || ''));
 
@@ -268,7 +268,7 @@ async function runLoop(messages) {
         messages.push({
           role: 'user',
           content:
-            '[CONTROLLO AUTOMATICO, non è un messaggio dell\'utente] Nella tua risposta dici di aver eseguito un\'azione (salvare, inviare, aggiungere...), ma in questo turno non hai usato nessuno strumento. Se l\'azione richiede uno strumento, chiamalo adesso. Se invece non l\'hai fatta o non serviva, riscrivi la risposta senza affermare di aver fatto qualcosa che non hai fatto.'
+            '[CONTROLLO AUTOMATICO, non è un messaggio dell\'utente] Nella tua risposta dichiari di aver eseguito un\'azione o prometti qualcosa per il futuro (salvare, inviare, ricordare, "d\'ora in poi..."), ma in questo turno non hai usato nessuno strumento. Se si tratta di una regola, preferenza o informazione che l\'utente vuole che tu ricordi, salvala adesso con lo strumento di memoria (regole e preferenze come sempre visibili). Se l\'azione richiede un altro strumento, chiamalo adesso. Se invece non serviva o non l\'hai fatta, riscrivi la risposta senza affermare cose che non hai fatto.'
         });
         continue;
       }
