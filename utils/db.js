@@ -195,7 +195,7 @@ export const tools = [
           },
           content: {
             type: 'string',
-            description: 'Cosa ricordare, scritto in modo chiaro e autosufficiente (con nomi e dettagli completi).'
+            description: 'Cosa ricordare, scritto in terza persona e in modo autosufficiente, con nomi e dettagli completi (es. "L\'utente si chiama Tobia", non "Il mio nome è Tobia").'
           },
           pinned: {
             type: 'boolean',
