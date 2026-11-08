@@ -8,7 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MODULES_DIR = path.join(__dirname, '..', 'modules');
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL = 'google/gemini-2.5-flash';
+const MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash';
 const MAX_TOOL_ROUNDS = 8;
 const REQUEST_TIMEOUT_MS = 90_000;
 const MAX_TOOL_RESULT_CHARS = 30_000;
@@ -244,17 +244,39 @@ function serializeToolResult(result) {
 /*  Ciclo Function Calling a due fasi                                  */
 /* ------------------------------------------------------------------ */
 
+// Il modello a volte scrive "ho salvato / ho inviato..." senza aver chiamato nessuno strumento.
+const ACTION_CLAIM =
+  /\b(ho|abbiamo)\s+(appena\s+)?(salvat[oa]|memorizzat[oa]|registrat[oa]|annotat[oa]|aggiunt[oa]|inviat[oa]|mandat[oa]|creat[oa]|eliminat[oa]|cancellat[oa]|aggiornat[oa]|impostat[oa]|programmat[oa])\b|(?:^|\s)(è|e'|sono)\s+stat[oaie]\s+(salvat|memorizzat|registrat|inviat|aggiunt|creat|eliminat|aggiornat)/i;
+
+export const claimsAction = (text) => ACTION_CLAIM.test(String(text || ''));
+
 async function runLoop(messages) {
   let finalText = null;
+  let toolsUsed = 0;
+  let guardUsed = false;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const message = await callModel(messages);
     const toolCalls = message.tool_calls;
 
     if (!toolCalls || toolCalls.length === 0) {
+      // Dichiara un'azione ma non ha usato strumenti: gli si chiede di verificare, una sola volta
+      if (!toolsUsed && !guardUsed && claimsAction(message.content)) {
+        guardUsed = true;
+        console.warn('[ai] La risposta dichiara un\'azione ma nessuno strumento è stato usato: chiedo di verificare.');
+        messages.push({ role: 'assistant', content: message.content });
+        messages.push({
+          role: 'user',
+          content:
+            '[CONTROLLO AUTOMATICO, non è un messaggio dell\'utente] Nella tua risposta dici di aver eseguito un\'azione (salvare, inviare, aggiungere...), ma in questo turno non hai usato nessuno strumento. Se l\'azione richiede uno strumento, chiamalo adesso. Se invece non l\'hai fatta o non serviva, riscrivi la risposta senza affermare di aver fatto qualcosa che non hai fatto.'
+        });
+        continue;
+      }
       finalText = message.content;
       break;
     }
+
+    toolsUsed += toolCalls.length;
 
     // Fase 1: l'assistente chiede i tool
     messages.push({
