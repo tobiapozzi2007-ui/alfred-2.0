@@ -1,4 +1,5 @@
 import { google } from 'googleapis';
+import { addDays, addMonths, nowParts, weekday } from '../utils/time.js';
 
 const TIMEZONE = process.env.BOT_TIMEZONE || 'Europe/Rome';
 const SCOPES = ['https://www.googleapis.com/auth/calendar'];
@@ -104,6 +105,62 @@ function addHours(value, hours) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Periodi predefiniti e date leggibili                               */
+/* ------------------------------------------------------------------ */
+
+// "YYYY-MM-DD" -> "lunedì 9 novembre 2026"
+function formatDay(dateStr, withYear = true) {
+  const d = new Date(`${dateStr}T12:00:00Z`);
+  return d.toLocaleDateString('it-IT', {
+    timeZone: 'UTC',
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    ...(withYear ? { year: 'numeric' } : {})
+  });
+}
+
+function resolvePeriod(period) {
+  const today = nowParts().date;
+  const monthStart = `${today.slice(0, 8)}01`;
+  const weekStart = addDays(today, -((weekday(today) + 6) % 7)); // settimana da lunedì
+
+  switch (period) {
+    case 'today':
+      return { from: today, to: today };
+    case 'tomorrow': {
+      const t = addDays(today, 1);
+      return { from: t, to: t };
+    }
+    case 'this_week':
+      return { from: weekStart, to: addDays(weekStart, 6) };
+    case 'next_7_days':
+      return { from: today, to: addDays(today, 6) };
+    case 'this_month':
+      return { from: monthStart, to: addDays(addMonths(monthStart, 1), -1) };
+    default:
+      throw new Error('Periodo non valido. Valori ammessi: today, tomorrow, this_week, next_7_days, this_month.');
+  }
+}
+
+// Giorno e ora già scritti in italiano, così non devono essere ricalcolati a mano
+function describeWhen(ev) {
+  if (ev.start?.date) {
+    const end = ev.end?.date ? addDays(ev.end.date, -1) : ev.start.date; // la fine su Google è esclusiva
+    return end > ev.start.date
+      ? `da ${formatDay(ev.start.date, false)} a ${formatDay(end, false)} (tutto il giorno)`
+      : `${formatDay(ev.start.date, false)} (tutto il giorno)`;
+  }
+  const start = new Date(ev.start?.dateTime);
+  if (isNaN(start.getTime())) return null;
+
+  const day = new Intl.DateTimeFormat('en-CA', { timeZone: TIMEZONE }).format(start); // YYYY-MM-DD locale
+  const time = (d) => d.toLocaleTimeString('it-IT', { timeZone: TIMEZONE, hour: '2-digit', minute: '2-digit' });
+  const end = ev.end?.dateTime ? new Date(ev.end.dateTime) : null;
+  return `${formatDay(day, false)}, ${time(start)}${end && !isNaN(end.getTime()) ? `–${time(end)}` : ''}`;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Tool                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -139,10 +196,16 @@ export const tools = [
     function: {
       name: 'get_calendar_events',
       description:
-        'Legge gli eventi del calendario Google dell\'utente in un intervallo. Se non si indicano date restituisce gli eventi di oggi. Per un singolo giorno basta indicare start_date.',
+        'Legge gli eventi del calendario Google dell\'utente. Per "oggi", "domani", "questa settimana" o "prossimi giorni" usa SEMPRE il parametro period e non calcolare le date da solo: il periodo viene calcolato con precisione dal sistema. Usa start_date e end_date solo per date precise indicate dall\'utente (es. "il 20 novembre"). Senza parametri restituisce gli eventi di oggi. Per ogni evento il campo "quando" contiene già giorno e ora scritti in italiano: usali così come sono.',
       parameters: {
         type: 'object',
         properties: {
+          period: {
+            type: 'string',
+            enum: ['today', 'tomorrow', 'this_week', 'next_7_days', 'this_month'],
+            description:
+              'Periodo già calcolato dal sistema: today = oggi, tomorrow = domani, this_week = da lunedì a domenica della settimana in corso, next_7_days = da oggi per 7 giorni, this_month = mese in corso.'
+          },
           start_date: {
             type: 'string',
             description: 'Inizio intervallo: "YYYY-MM-DD" o "YYYY-MM-DDTHH:MM:SS" (opzionale, default oggi).'
@@ -204,7 +267,14 @@ export const handlers = {
     };
   },
 
-  async get_calendar_events({ start_date, end_date, max_results = 25 } = {}) {
+  async get_calendar_events({ period, start_date, end_date, max_results = 25 } = {}) {
+    // Un periodo predefinito vince su qualunque data scritta dal modello: così "oggi" è sempre oggi
+    if (period) {
+      const range = resolvePeriod(period);
+      start_date = range.from;
+      end_date = range.to;
+    }
+
     const first = start_date ? String(start_date).trim() : todayInTz(TIMEZONE);
     const last = end_date ? String(end_date).trim() : DATE_ONLY.test(first) ? first : null;
 
@@ -228,6 +298,7 @@ export const handlers = {
     const events = (res.data.items || []).map((ev) => ({
       id: ev.id,
       titolo: ev.summary || '(senza titolo)',
+      quando: describeWhen(ev),
       inizio: ev.start?.dateTime || ev.start?.date,
       fine: ev.end?.dateTime || ev.end?.date,
       tutto_il_giorno: Boolean(ev.start?.date),
@@ -240,6 +311,8 @@ export const handlers = {
     );
 
     return {
+      oggi_e: formatDay(nowParts().date),
+      periodo_richiesto: period || null,
       intervallo: { da: timeMin.toISOString(), a: timeMax.toISOString(), fuso_orario: TIMEZONE },
       totale: events.length,
       eventi: events
