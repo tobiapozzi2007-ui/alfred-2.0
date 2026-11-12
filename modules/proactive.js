@@ -47,7 +47,7 @@ const BRIEFING_PROMPT = [
   'Con gli strumenti a tua disposizione raccogli, nell\'ordine:',
   '1) gli impegni di oggi;',
   '2) i promemoria in scadenza oggi;',
-  '3) il meteo di oggi nella città dell\'utente (se non la conosci dalle informazioni salvate, salta questa parte);',
+  '3) il meteo di oggi nella città dell\'utente: cerca la città con gli strumenti di memoria e, se davvero non la trovi, chiedila all\'utente in una riga finale invece di saltare la parte;',
   '4) le abitudini o attività che l\'utente vuole svolgere oggi, se hai strumenti per leggerle;',
   '5) le email importanti arrivate di recente, se hai strumenti per leggerle;',
   '6) le notizie principali che interessano all\'utente, se hai strumenti per leggerle.',
