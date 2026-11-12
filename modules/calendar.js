@@ -235,6 +235,10 @@ export const handlers = {
       descrizione: ev.description || null
     }));
 
+    console.log(
+      `[calendar] eventi da ${timeMin.toISOString()} a ${timeMax.toISOString()} (richiesta: ${start_date || '-'} → ${end_date || '-'}): ${events.length} trovati`
+    );
+
     return {
       intervallo: { da: timeMin.toISOString(), a: timeMax.toISOString(), fuso_orario: TIMEZONE },
       totale: events.length,
