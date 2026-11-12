@@ -3,6 +3,7 @@ import path from 'path';
 import fetch from 'node-fetch';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as dbModule from './db.js';
+import { COMMAND_LIST } from './commands.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MODULES_DIR = path.join(__dirname, '..', 'modules');
@@ -139,6 +140,8 @@ function buildSystemPrompt(queryText = '') {
     'Hai a disposizione degli strumenti: usali ogni volta che servono dati aggiornati o azioni concrete, senza chiedere conferma per semplici letture. Per azioni con effetti esterni (inviare messaggi, creare eventi) assicurati di avere tutti i dati necessari e, se manca qualcosa di essenziale, chiedilo.',
     'Dopo aver ricevuto il risultato di uno strumento, rileggi i dati e scrivi una risposta finale naturale, discorsiva e dettagliata. Non mostrare mai JSON, nomi di funzioni o dati grezzi all\'utente.',
     'Se uno strumento restituisce un errore, spiegalo in modo semplice e proponi come procedere.',
+    `Comandi Telegram che l\'utente può usare e che funzionano anche senza di te: ${COMMAND_LIST.map((c) => c.help).join(' | ')}. Se ti chiede quali comandi esistono o come fare una di queste cose, indicali.`,
+    'Per dati che cambiano (impegni del calendario, meteo, email, notizie, promemoria, spese) non rispondere mai basandoti su messaggi precedenti della conversazione, nemmeno se li hai scritti tu: richiama sempre lo strumento adatto, perché i dati possono essere cambiati.',
     'Memoria: quando l\'utente ti dà un\'informazione da ricordare, una preferenza o una regola, salvala subito con lo strumento di memoria, senza chiedere conferma. Frasi come "devi sempre", "d\'ora in poi", "ricordati che" o "come regola" indicano una regola o preferenza permanente: salvala subito, prima di rispondere. Regole, preferenze e istruzioni permanenti vanno salvate come "sempre visibili"; fatti e dati (contatti, date, indirizzi) come ricordi normali, in uno spazio di memoria coerente con quelli già esistenti. Scrivi le voci in terza persona ("L\'utente si chiama..."), mai in prima persona. Se una nuova informazione corregge o integra qualcosa di già salvato, aggiornala invece di crearne un\'altra. Se ciò che serve non compare nella memoria che ti viene mostrata, cercalo con lo strumento di lettura prima di dire che non lo sai o che non ricordi. Dì di aver salvato qualcosa solo se lo strumento ha avuto successo.',
     'Formato: testo semplice adatto a Telegram, senza Markdown (niente asterischi, cancelletti o backtick). Puoi andare a capo e usare qualche emoji con parsimonia.'
   ].join('\n');
@@ -353,8 +356,8 @@ export async function runTask(instruction) {
   if (!initialized) await initAI();
 
   const messages = [
+    // Nessuna cronologia: un compito automatico parte da zero, così non ripete ciò che era stato detto prima
     { role: 'system', content: buildSystemPrompt(instruction) },
-    ...dbModule.getRecentMessages(HISTORY_LIMIT),
     {
       role: 'user',
       content:
