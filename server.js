@@ -3,6 +3,7 @@ import fetch from 'node-fetch';
 import TelegramBot from 'node-telegram-bot-api';
 import { initAI, startModules, askAlfred, runTask, getToolCatalog } from './utils/ai.js';
 import { announceUpdate } from './utils/updates.js';
+import { handleCommand, COMMAND_LIST } from './utils/commands.js';
 import { clearHistory, saveMessage } from './utils/db.js';
 
 const { TELEGRAM_BOT_TOKEN, ALLOWED_USER_ID, OPENROUTER_API_KEY } = process.env;
@@ -15,6 +16,11 @@ if (!TELEGRAM_BOT_TOKEN || !ALLOWED_USER_ID || !OPENROUTER_API_KEY) {
 await initAI();
 
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
+
+// Il menù che compare quando scrivi "/" nella chat, così non serve ricordare i comandi
+bot
+  .setMyCommands(COMMAND_LIST.map(({ command, description }) => ({ command, description })))
+  .catch((err) => console.error('[telegram] Menù dei comandi non impostato:', err.message));
 
 const MAX_FILE_BYTES = 15 * 1024 * 1024;
 const DEFAULT_ATTACHMENT_PROMPT =
@@ -101,6 +107,21 @@ async function handleMessage(msg) {
       clearHistory();
       await bot.sendMessage(chatId, 'Conversazione azzerata. La memoria permanente è rimasta intatta.');
       return;
+    }
+
+    // Comandi che non passano dall'IA (/stato, /memoria, /regola, /aggiorna...)
+    if (text.startsWith('/')) {
+      try {
+        const reply = await handleCommand(text, { toolCount: getToolCatalog().length });
+        if (reply !== null) {
+          await sendLong(chatId, reply);
+          return;
+        }
+      } catch (err) {
+        console.error('[server] Errore nel comando:', err);
+        await bot.sendMessage(chatId, `Il comando non è riuscito: ${err.message}`);
+        return;
+      }
     }
   }
 
