@@ -140,6 +140,7 @@ function buildSystemPrompt(queryText = '') {
     'Hai a disposizione degli strumenti: usali ogni volta che servono dati aggiornati o azioni concrete, senza chiedere conferma per semplici letture. Per azioni con effetti esterni (inviare messaggi, creare eventi) assicurati di avere tutti i dati necessari e, se manca qualcosa di essenziale, chiedilo.',
     'Dopo aver ricevuto il risultato di uno strumento, rileggi i dati e scrivi una risposta finale naturale, discorsiva e dettagliata. Non mostrare mai JSON, nomi di funzioni o dati grezzi all\'utente.',
     'Se uno strumento restituisce un errore, spiegalo in modo semplice e proponi come procedere.',
+    'Le email non partono mai direttamente: prepara la bozza, mostrala, aspetta che l\'utente la confermi con un suo messaggio e solo dopo usa lo strumento di invio. Non dire mai di aver inviato un\'email se lo strumento di invio non ha avuto successo.',
     `Comandi Telegram che l\'utente può usare e che funzionano anche senza di te: ${COMMAND_LIST.map((c) => c.help).join(' | ')}. Se ti chiede quali comandi esistono o come fare una di queste cose, indicali.`,
     'Per dati che cambiano (impegni del calendario, meteo, email, notizie, promemoria, spese) non rispondere mai basandoti su messaggi precedenti della conversazione, nemmeno se li hai scritti tu: richiama sempre lo strumento adatto, perché i dati possono essere cambiati.',
     'Memoria: quando l\'utente ti dà un\'informazione da ricordare, una preferenza o una regola, salvala subito con lo strumento di memoria, senza chiedere conferma. Frasi come "devi sempre", "d\'ora in poi", "ricordati che" o "come regola" indicano una regola o preferenza permanente: salvala subito, prima di rispondere. Regole, preferenze e istruzioni permanenti vanno salvate come "sempre visibili"; fatti e dati (contatti, date, indirizzi) come ricordi normali, in uno spazio di memoria coerente con quelli già esistenti. Scrivi le voci in terza persona ("L\'utente si chiama..."), mai in prima persona. Se una nuova informazione corregge o integra qualcosa di già salvato, aggiornala invece di crearne un\'altra. Se ciò che serve non compare nella memoria che ti viene mostrata, cercalo con lo strumento di lettura prima di dire che non lo sai o che non ricordi. Dì di aver salvato qualcosa solo se lo strumento ha avuto successo.',
@@ -207,7 +208,7 @@ async function callModel(messages, { allowTools = true } = {}) {
 /*  Esecuzione dei tool                                                */
 /* ------------------------------------------------------------------ */
 
-async function runTool(call) {
+async function runTool(call, turn) {
   const name = call.function?.name;
   const handler = registeredHandlers[name];
 
@@ -223,7 +224,7 @@ async function runTool(call) {
 
   try {
     console.log(`[ai] Tool: ${name}`, JSON.stringify(args));
-    const result = await handler(args);
+    const result = await handler(args, turn); // turn: chi ha avviato questo giro (utente o compito automatico) e quando
     return result === undefined ? { success: true } : result;
   } catch (err) {
     console.error(`[ai] Errore nel tool ${name}:`, err);
@@ -253,7 +254,7 @@ const ACTION_CLAIM =
 
 export const claimsAction = (text) => ACTION_CLAIM.test(String(text || ''));
 
-async function runLoop(messages) {
+async function runLoop(messages, turn = {}) {
   let finalText = null;
   let toolsUsed = 0;
   let guardUsed = false;
@@ -290,7 +291,7 @@ async function runLoop(messages) {
 
     // Fase 2: i risultati rientrano in Gemini (role: 'tool')
     for (const call of toolCalls) {
-      const result = await runTool(call);
+      const result = await runTool(call, turn);
       messages.push({
         role: 'tool',
         tool_call_id: call.id,
@@ -330,6 +331,8 @@ function buildUserContent(text, attachments) {
 // Messaggio dell'utente (con eventuali foto o PDF) -> risposta; salva lo scambio nella cronologia
 export async function askAlfred(userText, attachments = []) {
   if (!initialized) await initAI();
+  // Serve a strumenti delicati (es. l'invio di email) per sapere cosa ha scritto davvero l'utente
+  const turn = { source: 'user', startedAt: Date.now(), userText: attachments.length ? '' : userText };
 
   const history = dbModule.getRecentMessages(HISTORY_LIMIT);
   const previousUser = [...history].reverse().find((m) => m.role === 'user')?.content || '';
@@ -341,7 +344,7 @@ export async function askAlfred(userText, attachments = []) {
   ];
 
   const finalText =
-    (await runLoop(messages)) || 'Scusa, non sono riuscito a formulare una risposta. Riprova pure.';
+    (await runLoop(messages, turn)) || 'Scusa, non sono riuscito a formulare una risposta. Riprova pure.';
 
   // In cronologia resta solo il testo (gli allegati non vengono conservati)
   dbModule.saveMessage('user', attachments.length ? `${userText}\n[allegati inviati: ${attachments.length}]` : userText);
@@ -366,7 +369,7 @@ export async function runTask(instruction) {
     }
   ];
 
-  const text = await runLoop(messages);
+  const text = await runLoop(messages, { source: 'task', startedAt: Date.now(), userText: '' });
   if (!text) throw new Error('Il modello non ha prodotto alcun testo per il compito automatico.');
   return text;
 }
