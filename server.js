@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import fetch from 'node-fetch';
 import TelegramBot from 'node-telegram-bot-api';
-import { initAI, startModules, askAlfred, runTask, getToolCatalog } from './utils/ai.js';
+import { initAI, startModules, askAlfred, runTask, getToolCatalog, getModuleCommands } from './utils/ai.js';
 import { announceUpdate } from './utils/updates.js';
 import { handleCommand, COMMAND_LIST } from './utils/commands.js';
 import { clearHistory, saveMessage } from './utils/db.js';
@@ -19,7 +19,7 @@ const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
 // Il menù che compare quando scrivi "/" nella chat, così non serve ricordare i comandi
 bot
-  .setMyCommands(COMMAND_LIST.map(({ command, description }) => ({ command, description })))
+  .setMyCommands([...COMMAND_LIST, ...getModuleCommands()].map(({ command, description }) => ({ command, description })))
   .catch((err) => console.error('[telegram] Menù dei comandi non impostato:', err.message));
 
 const MAX_FILE_BYTES = 15 * 1024 * 1024;
@@ -94,6 +94,52 @@ async function collectAttachments(msg) {
 /*  Gestione messaggi                                                  */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/*  Pulsanti inline: i moduli possono mandarli e ricevere la pressione  */
+/* ------------------------------------------------------------------ */
+
+const callbackHandlers = new Map(); // prefisso -> funzione
+
+// Un modulo registra un prefisso (es. "pc"): ogni callback_data "pc:..." arriva alla sua funzione.
+// La funzione restituisce { toast, text }: toast = avviso breve, text = nuovo testo del messaggio (toglie i pulsanti).
+function onCallback(prefix, fn) {
+  callbackHandlers.set(prefix, fn);
+}
+
+// rows: [[{ text, callback_data }, ...], ...]
+async function sendButtons(text, rows) {
+  const sent = await bot.sendMessage(ALLOWED_USER_ID, text, { reply_markup: { inline_keyboard: rows } });
+  saveMessage('assistant', text);
+  return sent;
+}
+
+bot.on('callback_query', async (query) => {
+  // Sicurezza: solo l'utente autorizzato può premere i pulsanti
+  if (String(query.from?.id) !== String(ALLOWED_USER_ID)) {
+    bot.answerCallbackQuery(query.id).catch(() => {});
+    return;
+  }
+
+  const fn = callbackHandlers.get(String(query.data || '').split(':')[0]);
+  if (!fn) {
+    bot.answerCallbackQuery(query.id, { text: 'Questo pulsante non è più valido.' }).catch(() => {});
+    return;
+  }
+
+  try {
+    const result = (await fn(query.data)) || {};
+    await bot.answerCallbackQuery(query.id, result.toast ? { text: result.toast } : {}).catch(() => {});
+    if (result.text && query.message) {
+      await bot
+        .editMessageText(result.text, { chat_id: query.message.chat.id, message_id: query.message.message_id })
+        .catch((err) => console.error('[server] Messaggio non modificato:', err.message));
+    }
+  } catch (err) {
+    console.error('[server] Errore nel pulsante:', err);
+    bot.answerCallbackQuery(query.id, { text: 'Qualcosa è andato storto.' }).catch(() => {});
+  }
+});
+
 async function handleMessage(msg) {
   const chatId = msg.chat.id;
   const text = (msg.text || msg.caption || '').trim();
@@ -112,7 +158,7 @@ async function handleMessage(msg) {
     // Comandi che non passano dall'IA (/stato, /memoria, /regola, /aggiorna...)
     if (text.startsWith('/')) {
       try {
-        const reply = await handleCommand(text, { toolCount: getToolCatalog().length });
+        const reply = await handleCommand(text, { toolCount: getToolCatalog().length, moduleCommands: getModuleCommands() });
         if (reply !== null) {
           await sendLong(chatId, reply);
           return;
@@ -170,7 +216,16 @@ bot.on('message', (msg) => {
 bot.on('polling_error', (err) => console.error('[telegram] polling_error:', err.code || '', err.message));
 
 // Avvia le attività proprie dei moduli (promemoria, briefing, email, backup...)
-await startModules({ chatId: ALLOWED_USER_ID, notify });
+// Un modulo può mandare un testo senza registrarlo in cronologia (send) o far elaborare una richiesta
+// come se arrivasse dall'utente (ask), accodata insieme ai messaggi di Telegram.
+const send = (text) => sendLong(ALLOWED_USER_ID, text);
+const ask = (text, options) => {
+  const run = queue.then(() => askAlfred(text, [], options));
+  queue = run.catch(() => {});
+  return run;
+};
+
+await startModules({ chatId: ALLOWED_USER_ID, notify, send, ask, sendButtons, onCallback });
 
 // Dopo un aggiornamento scrive all'utente cosa è cambiato e quali nuove skill ha imparato
 announceUpdate({ catalog: getToolCatalog(), notify, runTask }).catch((err) =>
