@@ -21,6 +21,7 @@ let registeredTools = [];
 let registeredHandlers = {};
 let toolSource = {};
 let initHooks = [];
+let moduleCommands = [];
 let initialized = false;
 
 /* ------------------------------------------------------------------ */
@@ -70,6 +71,7 @@ export async function initAI() {
   registeredHandlers = {};
   toolSource = {};
   initHooks = [];
+  moduleCommands = [];
 
   // Memoria permanente (utils/db.js): accetta sia tools/handlers sia dbTools/dbHandlers
   register(dbModule.tools ?? dbModule.dbTools, dbModule.handlers ?? dbModule.dbHandlers, 'utils/db.js');
@@ -86,6 +88,14 @@ export async function initAI() {
       register(mod.tools, mod.handlers, `modules/${file}`);
       // Hook opzionale: un modulo può esportare init(ctx) per avviare attività proprie (timer, controlli periodici)
       if (typeof mod.init === 'function') initHooks.push({ file, init: mod.init });
+      // Comandi Telegram del modulo: [{ command, description, help, handler(args) -> testo }]
+      for (const c of Array.isArray(mod.commands) ? mod.commands : []) {
+        if (c?.command && typeof c.handler === 'function' && !moduleCommands.some((m) => m.command === c.command)) {
+          moduleCommands.push({ ...c, source: file });
+        } else {
+          console.warn(`[ai] Comando non valido o duplicato in ${file}:`, c?.command);
+        }
+      }
       console.log(`[ai] Modulo caricato: ${file}`);
     } catch (err) {
       console.error(`[ai] Errore nel caricamento di ${file}:`, err.message);
@@ -94,6 +104,11 @@ export async function initAI() {
 
   initialized = true;
   console.log(`[ai] ${registeredTools.length} tool disponibili.`);
+}
+
+// Comandi Telegram aggiunti dai moduli (si registrano da soli, come gli strumenti)
+export function getModuleCommands() {
+  return moduleCommands;
 }
 
 // Elenco delle capacità caricate (serve ad annunciare le nuove skill dopo un aggiornamento)
@@ -127,7 +142,11 @@ export async function startModules(baseCtx) {
 /*  Prompt di sistema (generico)                                       */
 /* ------------------------------------------------------------------ */
 
-function buildSystemPrompt(queryText = '') {
+// Quando la richiesta arriva dalla voce, la risposta verrà letta ad alta voce su uno schermo
+const VOICE_STYLE =
+  'Questa richiesta arriva dalla voce e la tua risposta verrà letta ad alta voce su uno schermo: rispondi in italiano con frasi brevi e naturali (al massimo tre o quattro), senza elenchi, emoji, simboli, indirizzi web o formattazione. Se serve una conferma (per esempio per inviare un\'email), di\' che la richiesta di conferma si trova su Telegram.';
+
+function buildSystemPrompt(queryText = '', extra = '') {
   const now = new Date().toLocaleString('it-IT', {
     timeZone: TIMEZONE,
     dateStyle: 'full',
@@ -141,7 +160,7 @@ function buildSystemPrompt(queryText = '') {
     'Dopo aver ricevuto il risultato di uno strumento, rileggi i dati e scrivi una risposta finale naturale, discorsiva e dettagliata. Non mostrare mai JSON, nomi di funzioni o dati grezzi all\'utente.',
     'Se uno strumento restituisce un errore, spiegalo in modo semplice e proponi come procedere.',
     'Le email non partono mai direttamente: prepara la bozza, mostrala, aspetta che l\'utente la confermi con un suo messaggio e solo dopo usa lo strumento di invio. Non dire mai di aver inviato un\'email se lo strumento di invio non ha avuto successo.',
-    `Comandi Telegram che l\'utente può usare e che funzionano anche senza di te: ${COMMAND_LIST.map((c) => c.help).join(' | ')}. Se ti chiede quali comandi esistono o come fare una di queste cose, indicali.`,
+    `Comandi Telegram che l\'utente può usare e che funzionano anche senza di te: ${[...COMMAND_LIST, ...moduleCommands].map((c) => c.help).join(' | ')}. Se ti chiede quali comandi esistono o come fare una di queste cose, indicali.`,
     'Per dati che cambiano (impegni del calendario, meteo, email, notizie, promemoria, spese) non rispondere mai basandoti su messaggi precedenti della conversazione, nemmeno se li hai scritti tu: richiama sempre lo strumento adatto, perché i dati possono essere cambiati.',
     'Memoria: quando l\'utente ti dà un\'informazione da ricordare, una preferenza o una regola, salvala subito con lo strumento di memoria, senza chiedere conferma. Frasi come "devi sempre", "d\'ora in poi", "ricordati che" o "come regola" indicano una regola o preferenza permanente: salvala subito, prima di rispondere. Regole, preferenze e istruzioni permanenti vanno salvate come "sempre visibili"; fatti e dati (contatti, date, indirizzi) come ricordi normali, in uno spazio di memoria coerente con quelli già esistenti. Scrivi le voci in terza persona ("L\'utente si chiama..."), mai in prima persona. Se una nuova informazione corregge o integra qualcosa di già salvato, aggiornala invece di crearne un\'altra. Se ciò che serve non compare nella memoria che ti viene mostrata, cercalo con lo strumento di lettura prima di dire che non lo sai o che non ricordi. Dì di aver salvato qualcosa solo se lo strumento ha avuto successo.',
     'Formato: testo semplice adatto a Telegram, senza Markdown (niente asterischi, cancelletti o backtick). Puoi andare a capo e usare qualche emoji con parsimonia.'
@@ -153,7 +172,7 @@ function buildSystemPrompt(queryText = '') {
   } catch (err) {
     console.error('[ai] Contesto di memoria non disponibile:', err.message);
   }
-  return memory ? `${base}\n\n${memory}` : base;
+  return [base, extra, memory].filter(Boolean).join('\n\n');
 }
 
 /* ------------------------------------------------------------------ */
@@ -329,16 +348,18 @@ function buildUserContent(text, attachments) {
 }
 
 // Messaggio dell'utente (con eventuali foto o PDF) -> risposta; salva lo scambio nella cronologia
-export async function askAlfred(userText, attachments = []) {
+export async function askAlfred(userText, attachments = [], options = {}) {
   if (!initialized) await initAI();
   // Serve a strumenti delicati (es. l'invio di email) per sapere cosa ha scritto davvero l'utente
-  const turn = { source: 'user', startedAt: Date.now(), userText: attachments.length ? '' : userText };
+  // source: 'user' (Telegram) o 'voice' (microfono del PC): la voce non può confermare azioni delicate come l'invio di email
+  const source = options.source || 'user';
+  const turn = { source, startedAt: Date.now(), userText: attachments.length ? '' : userText };
 
   const history = dbModule.getRecentMessages(HISTORY_LIMIT);
   const previousUser = [...history].reverse().find((m) => m.role === 'user')?.content || '';
 
   const messages = [
-    { role: 'system', content: buildSystemPrompt(`${userText}\n${previousUser}`) },
+    { role: 'system', content: buildSystemPrompt(`${userText}\n${previousUser}`, source === 'voice' ? VOICE_STYLE : '') },
     ...history,
     { role: 'user', content: attachments.length ? buildUserContent(userText, attachments) : userText }
   ];
